@@ -41,7 +41,6 @@ public:
     Atomic<size_t> numDelFailure;
     Atomic<size_t> numOpenFailure;
     Atomic<size_t> numVbSetFailure;
-    Atomic<size_t> numCommitRetry;
 
     /* for flush and vb delete, no error handling in CouchKVStore, such
      * failure should be tracked in MC-engine  */
@@ -58,10 +57,10 @@ public:
     Histogram<hrtime_t> delTimeHisto;
     // Time spent in couchstore commit
     Histogram<hrtime_t> commitHisto;
-    // Time spent in couchstore commit retry
-    Histogram<hrtime_t> commitRetryHisto;
     // Time spent in couchstore save documents
     Histogram<hrtime_t> saveDocsHisto;
+    // Time spent in compacting vbucket database
+    Histogram<hrtime_t> compactHisto;
 
     // Stats from the underlying OS file operations done by couchstore.
     CouchstoreStats fsStats;
@@ -319,6 +318,10 @@ private:
     couchstore_error_t saveVBState(Db *db, vbucket_state &vbState);
     void setDocsCommitted(uint16_t docs);
     void closeDatabaseHandle(Db *db);
+
+    Db* compactDatabase(Db *sourcedb, uint16_t vbucket,
+                        int fileRev, couchstore_error_t &errCode);
+    size_t getFragmentationRatio(Db *db, const std::string &dbfile);
 
     EventuallyPersistentEngine &engine;
     EPStats &epStats;

@@ -75,6 +75,8 @@ memcached like this:
 | db_shards              | int    | Number of shards for db store              |
 | db_strategy            | string | DB store strategy ("multiDB", "singleDB"   |
 |                        |        | or "singleMTDB")                           |
+| db_frag_threshold      | int    | DB fragmentation threshold at which the    |
+|                        |        | compaction is triggered                    |
 | concurrentDB           | bool   | True (default) if concurrent DB reads are  |
 |                        |        | permitted where possible.                  |
 | chk_remover_stime      | int    | Interval for the checkpoint remover that   |

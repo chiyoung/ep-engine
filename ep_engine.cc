@@ -421,6 +421,8 @@ extern "C" {
                 e->getConfiguration().setAlogTaskTime(v);
             } else if (strcmp(keyz, "pager_active_vb_pcnt") == 0) {
                 e->getConfiguration().setPagerActiveVbPcnt(v);
+            } else if (strcmp(keyz, "db_frag_threshold") == 0) {
+                e->getConfiguration().setDbFragThreshold(v);
             } else {
                 *msg = "Unknown config param";
                 rv = PROTOCOL_BINARY_RESPONSE_KEY_ENOENT;

@@ -27,6 +27,8 @@ static const int MUTATION_FAILED = -1;
 static const int DOC_NOT_FOUND = 0;
 static const int MUTATION_SUCCESS = 1;
 
+static const int64_t COMPACTION_MIN_FILE_SIZE = 131072;
+
 extern "C" {
     static int recordDbDumpC(Db *db, DocInfo *docinfo, void *ctx)
     {
@@ -888,7 +890,6 @@ void CouchKVStore::addStats(const std::string &prefix,
         addStat(prefix_str, "failure_del",   st.numDelFailure,   add_stat, c);
         addStat(prefix_str, "failure_vbset", st.numVbSetFailure, add_stat, c);
         addStat(prefix_str, "lastCommDocs",  st.docsCommitted,   add_stat, c);
-        addStat(prefix_str, "numCommitRetry", st.numCommitRetry, add_stat, c);
     }
 }
 
@@ -899,7 +900,7 @@ void CouchKVStore::addTimingStats(const std::string &prefix,
     }
     const char *prefix_str = prefix.c_str();
     addStat(prefix_str, "commit",      st.commitHisto,      add_stat, c);
-    addStat(prefix_str, "commitRetry", st.commitRetryHisto, add_stat, c);
+    addStat(prefix_str, "compaction",  st.compactHisto,     add_stat, c);
     addStat(prefix_str, "delete",      st.delTimeHisto,     add_stat, c);
     addStat(prefix_str, "save_documents", st.saveDocsHisto, add_stat, c);
     addStat(prefix_str, "writeTime",   st.writeTimeHisto,   add_stat, c);
@@ -1471,107 +1472,89 @@ bool CouchKVStore::commit2couchstore(void)
     return success;
 }
 
-couchstore_error_t CouchKVStore::saveDocs(uint16_t vbid, int rev, Doc **docs,
+couchstore_error_t CouchKVStore::saveDocs(uint16_t vbid, int fileRev, Doc **docs,
                                           DocInfo **docinfos, int docCount)
 {
-    couchstore_error_t errCode;
-    int fileRev;
-    uint16_t newFileRev;
+    hrtime_t cs_begin = gethrtime();
     Db *db = NULL;
-    bool retry_save_docs;
-    bool retried = false;
-    hrtime_t retry_begin = (hrtime_t)0;
-    hrtime_t cs_begin = (hrtime_t)0;
+    couchstore_error_t errCode = openDB(vbid, fileRev, &db,
+                                        (uint64_t)COUCHSTORE_OPEN_FLAG_CREATE, NULL);
+    if (errCode != COUCHSTORE_SUCCESS) {
+        getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                         "Warning: failed to open database, vbucketId = %d "
+                         "fileRev = %d\n", vbid, fileRev);
+        return errCode;
+    } else {
+        Db *newdb = compactDatabase(db, vbid, fileRev, errCode);
+        if (!newdb) {
+            getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                "Warning: compaction returns NULL DB handle, error=%s errno=%s\n",
+                couchstore_strerror(errCode), couchkvstore_strerrno(errCode));
+            return errCode;
+        }
+        if (db != newdb) {
+            db = newdb;
+            std::map<uint16_t, int>::iterator it = dbFileMap.find(vbid);
+            assert(it != dbFileMap.end());
+            fileRev = it->second;
+        }
 
-    fileRev = rev;
-    assert(fileRev);
+        uint32_t max = computeMaxDeletedSeqNum(docinfos, docCount);
+        // update max_deleted_seq in the local doc (vbstate)
+        // before save docs for the given vBucket
+        if (max > 0) {
+            vbucket_map_t::iterator it = cachedVBStates.find(vbid);
+            if (it != cachedVBStates.end() && it->second.maxDeletedSeqno < max) {
+                it->second.maxDeletedSeqno = max;
+                errCode = saveVBState(db, it->second);
+                if (errCode != COUCHSTORE_SUCCESS) {
+                    getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                                     "Warning: failed to save local doc for, "
+                                     "vBucket = %d\n", vbid);
+                    closeDatabaseHandle(db);
+                    return errCode;
+                }
+            }
+        }
 
-    do {
-        retry_save_docs = false;
-        errCode = openDB(vbid, fileRev, &db,
-                         (uint64_t)COUCHSTORE_OPEN_FLAG_CREATE, &newFileRev);
+        errCode = couchstore_save_documents(db, docs, docinfos, docCount,
+                                            0 /* no options */);
+        st.saveDocsHisto.add((gethrtime() - cs_begin) / 1000);
         if (errCode != COUCHSTORE_SUCCESS) {
             getLogger()->log(EXTENSION_LOG_WARNING, NULL,
-                             "Warning: failed to open database, vbucketId = %d "
-                             "fileRev = %d\n", vbid, fileRev);
-            return errCode;
-        } else {
-            uint32_t max = computeMaxDeletedSeqNum(docinfos, docCount);
-
-            // update max_deleted_seq in the local doc (vbstate)
-            // before save docs for the given vBucket
-            if (max > 0) {
-                vbucket_map_t::iterator it =
-                    cachedVBStates.find(vbid);
-                if (it != cachedVBStates.end() && it->second.maxDeletedSeqno < max) {
-                    it->second.maxDeletedSeqno = max;
-                    errCode = saveVBState(db, it->second);
-                    if (errCode != COUCHSTORE_SUCCESS) {
-                        getLogger()->log(EXTENSION_LOG_WARNING, NULL,
-                                         "Warning: failed to save local doc for, "
-                                         "vBucket = %d\n", vbid);
-                        closeDatabaseHandle(db);
-                        return errCode;
-                    }
-                }
-            }
-
-            cs_begin = gethrtime();
-            errCode = couchstore_save_documents(db, docs, docinfos, docCount,
-                                                0 /* no options */);
-            st.saveDocsHisto.add((gethrtime() - cs_begin) / 1000);
-            if (errCode != COUCHSTORE_SUCCESS) {
-                getLogger()->log(EXTENSION_LOG_WARNING, NULL,
-                    "Warning: failed to save docs to database, error=%s errno=%s\n",
-                    couchstore_strerror(errCode), couchkvstore_strerrno(errCode));
-                closeDatabaseHandle(db);
-                return errCode;
-            }
-
-            cs_begin = gethrtime();
-            errCode = couchstore_commit(db);
-            st.commitHisto.add((gethrtime() - cs_begin) / 1000);
-            if (errCode) {
-                getLogger()->log(EXTENSION_LOG_WARNING, NULL,
-                    "Warning: couchstore_commit failed, error=%s errno=%s\n",
-                    couchstore_strerror(errCode), couchkvstore_strerrno(errCode));
-                closeDatabaseHandle(db);
-                return errCode;
-            }
-
-            RememberingCallback<uint16_t> cb;
-            uint64_t newHeaderPos = couchstore_get_header_position(db);
-            couchNotifier->notify_headerpos_update(vbid, newFileRev, newHeaderPos, cb);
-            if (cb.val != PROTOCOL_BINARY_RESPONSE_SUCCESS) {
-                if (cb.val == PROTOCOL_BINARY_RESPONSE_ETMPFAIL) {
-                    getLogger()->log(EXTENSION_LOG_WARNING, NULL,
-                                   "Retry notify CouchDB of update, vbucket=%d rev=%d\n",
-                                     vbid, newFileRev);
-                    fileRev = newFileRev;
-                    retry_save_docs = true;
-                    ++st.numCommitRetry;
-                    if (!retried) {
-                        retry_begin = gethrtime();
-                        retried = true;
-                    }
-                } else {
-                    getLogger()->log(EXTENSION_LOG_WARNING, NULL,
-                                     "Warning: failed to notify CouchDB of "
-                                     "update for vbucket=%d, error=0x%x\n",
-                                     vbid, cb.val);
-                    abort();
-                }
-            }
+                "Warning: failed to save docs to database, error=%s errno=%s\n",
+                couchstore_strerror(errCode), couchkvstore_strerrno(errCode));
             closeDatabaseHandle(db);
+            return errCode;
         }
-    } while (retry_save_docs);
+
+        cs_begin = gethrtime();
+        errCode = couchstore_commit(db);
+        st.commitHisto.add((gethrtime() - cs_begin) / 1000);
+        if (errCode) {
+            getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                "Warning: couchstore_commit failed, error=%s errno=%s\n",
+                couchstore_strerror(errCode), couchkvstore_strerrno(errCode));
+            closeDatabaseHandle(db);
+            return errCode;
+        }
+
+        RememberingCallback<uint16_t> cb;
+        uint64_t newHeaderPos = couchstore_get_header_position(db);
+        couchNotifier->notify_headerpos_update(vbid, fileRev, newHeaderPos, cb);
+        if (cb.val != PROTOCOL_BINARY_RESPONSE_SUCCESS) {
+            getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                             "Warning: failed to notify couchbase indexer of "
+                             "the new header location for vbucket=%d rev=%d\n",
+                             vbid, fileRev);
+        }
+    }
+
+    closeDatabaseHandle(db);
 
     /* update stat */
     if(errCode == COUCHSTORE_SUCCESS) {
         st.docsCommitted = docCount;
-    }
-    if (retried) {
-        st.commitRetryHisto.add((gethrtime() - retry_begin) / 1000);
     }
 
     return errCode;
@@ -1846,6 +1829,130 @@ bool CouchKVStore::getEstimatedItemCount(size_t &items)
         }
     }
     return true;
+}
+
+size_t CouchKVStore::getFragmentationRatio(Db *db, const std::string &dbfile)
+{
+    if (!db) {
+        return 0;
+    }
+
+    DbInfo info;
+    couchstore_error_t errCode = couchstore_db_info(db, &info);
+    if (errCode != COUCHSTORE_SUCCESS) {
+        getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                         "Warning: failed to read database info for "
+                         "the DB file \'%s\' to get the fragmentation ratio\n",
+                         dbfile.c_str());
+        return 0;
+    }
+
+    std::ifstream vb_file;
+    int64_t flen = 0;
+    vb_file.exceptions (vb_file.failbit | vb_file.badbit);
+    try {
+        vb_file.open(dbfile.c_str(), ios::binary);
+        vb_file.seekg(0, ios::end);
+        flen = vb_file.tellg();
+        vb_file.close();
+        if (flen == -1) {
+            getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                             "Warning: failed to execute tellg() on the DB file \'%s\'\n",
+                             dbfile.c_str());
+            return 0;
+        } else if (flen < COMPACTION_MIN_FILE_SIZE) {
+            getLogger()->log(EXTENSION_LOG_INFO, NULL,
+                             "Size of DB file \'%s\' is too small to estimate "
+                             "the fragmentation ratio\n",
+                             dbfile.c_str());
+            return 0;
+        }
+    } catch (const std::ifstream::failure& e) {
+        getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                         "Warning: failed to get the size of the DB file \'%s\' "
+                         "due to IO exception \"%s\"\n", dbfile.c_str(), e.what());
+        return 0;
+    }
+
+    size_t frag_ratio = 0;
+    int64_t frag_size = flen - info.space_used;
+    if (frag_size > 0) {
+        double ratio = static_cast<double>(frag_size) / static_cast<double>(flen);
+        frag_ratio = static_cast<size_t>(ratio * 100);
+    }
+    return frag_ratio;
+}
+
+Db* CouchKVStore::compactDatabase(Db *sourcedb, uint16_t vb,
+                                  int revnum, couchstore_error_t &errCode)
+{
+    if (!sourcedb) {
+        getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                         "Warning: compaction source db handle "
+                         " for vbucket %d is null!!!\n", vb);
+        return sourcedb;
+    }
+
+    hrtime_t start = gethrtime();
+    std::string dbfile;
+
+    if (!(getDbFile(vb, dbfile))) {
+        getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                         "Warning: failed to locate database file %s "
+                         "for compaction.\n",
+                         dbfile.c_str());
+        return sourcedb;
+    }
+
+    if (getFragmentationRatio(sourcedb, dbfile) <= configuration.getDbFragThreshold()) {
+        getLogger()->log(EXTENSION_LOG_DEBUG, NULL,
+                         "Fragmentation ratio for vbucket %d is still below threshold. "
+                         "Skip compaction...\n", vb);
+        return sourcedb;
+    }
+
+    std::string compact_file = dbfile + ".compact";
+    errCode = couchstore_compact_db(sourcedb, compact_file.c_str());
+    if (errCode != COUCHSTORE_SUCCESS) {
+        getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                         "Warning: failed to compact database with name=%s "
+                         "error=%s errno=%s\n",
+                         dbfile.c_str(),
+                         couchstore_strerror(errCode),
+                         couchkvstore_strerrno(errCode));
+        return sourcedb;
+    }
+
+    int new_rev = revnum + 1;
+    std::string new_file = getDBFileName(dbname, vb, new_rev);
+    if (access(compact_file.c_str(), F_OK) == 0 &&
+        rename(compact_file.c_str(), new_file.c_str()) != 0) {
+        getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                         "Warning: failed to rename '%s' to '%s': %s",
+                         compact_file.c_str(), new_file.c_str(), strerror(errno));
+        remove(compact_file.c_str());
+        return sourcedb;
+    }
+    if (access(dbfile.c_str(), F_OK) == 0 && remove(dbfile.c_str()) != 0) {
+        getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                         "Warning: Failed to remove '%s': %s",
+                         dbfile.c_str(), strerror(errno));
+    }
+
+    closeDatabaseHandle(sourcedb);
+    updateDbFileMap(vb, new_rev);
+
+    Db *newdb = NULL;
+    errCode = openDB(vb, new_rev, &newdb, 0, NULL);
+    if (errCode != COUCHSTORE_SUCCESS) {
+        getLogger()->log(EXTENSION_LOG_WARNING, NULL,
+                         "Warning: failed to open the compacted database "
+                         "for vbucket %d.\n", vb);
+        return NULL;
+    }
+
+    st.compactHisto.add((gethrtime() - start) / 1000);
+    return newdb;
 }
 
 /* end of couch-kvstore.cc */

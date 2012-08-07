@@ -136,6 +136,8 @@ Available params for "set":
     bg_fetch_delay            - Delay before executing a bg fetch (test
                                 feature).
     couch_response_timeout    - timeout in receiving a response from couchdb.
+    db_frag_threshold         - Database fragmentation threshold at which the
+                                compaction is triggered.
     exp_pager_stime           - Expiry Pager Sleeptime.
     flushall_enabled          - Enable flush operation.
     klog_compactor_queue_cap  - queue cap to throttle the log compactor.
