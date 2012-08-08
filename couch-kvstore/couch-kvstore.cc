@@ -28,6 +28,13 @@ static const int DOC_NOT_FOUND = 0;
 static const int MUTATION_SUCCESS = 1;
 
 static const int64_t COMPACTION_MIN_FILE_SIZE = 131072;
+// Disk usage threshold that allows us to skip compaction
+// when the disk write queue size is still above its cap.
+static const size_t QUEUE_CAP_DISK_USAGE_THRESHOLD = 66;
+// Maximum disk usage threshold.
+static const size_t MAX_DISK_USAGE_THRESHOLD = 90;
+// Database fragmentation threshold if disk is getting full.
+static const size_t DISK_FULL_FRAG_THRESHOLD = 2;
 
 extern "C" {
     static int recordDbDumpC(Db *db, DocInfo *docinfo, void *ctx)
@@ -1890,6 +1897,31 @@ size_t CouchKVStore::getFragmentationRatio(Db *db, const std::string &dbfile)
     return frag_ratio;
 }
 
+bool CouchKVStore::shouldCompact(Db *db, const std::string &dbfile)
+{
+    size_t disk_usage = epStats.diskUsage;
+    size_t disk_qsize = epStats.queue_size + epStats.flusher_todo;
+    size_t queue_cap = epStats.tapThrottleWriteQueueCap;
+
+    if (disk_qsize > queue_cap && disk_usage > 0 &&
+        disk_usage < QUEUE_CAP_DISK_USAGE_THRESHOLD) {
+        return false;
+    }
+
+    size_t frag_threshold = configuration.getDbFragThreshold();
+    size_t frag_ratio = getFragmentationRatio(db, dbfile);
+    bool compact = false;
+
+    if (disk_usage > MAX_DISK_USAGE_THRESHOLD &&
+        frag_ratio > DISK_FULL_FRAG_THRESHOLD) {
+        compact = true;
+    } else if (frag_ratio > frag_threshold) {
+        compact = true;
+    }
+
+    return compact;
+}
+
 Db* CouchKVStore::compactDatabase(Db *sourcedb, uint16_t vb,
                                   int revnum, couchstore_error_t &errCode)
 {
@@ -1911,10 +1943,9 @@ Db* CouchKVStore::compactDatabase(Db *sourcedb, uint16_t vb,
         return sourcedb;
     }
 
-    if (getFragmentationRatio(sourcedb, dbfile) <= configuration.getDbFragThreshold()) {
+    if (!shouldCompact(sourcedb, dbfile)) {
         getLogger()->log(EXTENSION_LOG_DEBUG, NULL,
-                         "Fragmentation ratio for vbucket %d is still below threshold. "
-                         "Skip compaction...\n", vb);
+                         "Skip the compaction for vbucket %d\n", vb);
         return sourcedb;
     }
 

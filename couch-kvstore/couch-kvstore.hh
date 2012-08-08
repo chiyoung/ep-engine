@@ -322,6 +322,7 @@ private:
     Db* compactDatabase(Db *sourcedb, uint16_t vbucket,
                         int fileRev, couchstore_error_t &errCode);
     size_t getFragmentationRatio(Db *db, const std::string &dbfile);
+    bool shouldCompact(Db *db, const std::string &dbfile);
 
     EventuallyPersistentEngine &engine;
     EPStats &epStats;
