@@ -2683,6 +2683,7 @@ ENGINE_ERROR_CODE EventuallyPersistentEngine::doEngineStats(const void *cookie,
 
     add_casted_stat("ep_flusher_num_completed", epstats.numCompletedFlush,
                     add_stat, cookie);
+    add_casted_stat("ep_disk_usage", epstats.diskUsage, add_stat, cookie);
 
     if (getConfiguration().isWarmup()) {
         Warmup *wp = epstore->getWarmup();

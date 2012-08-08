@@ -79,6 +79,43 @@ static inline int my_pthread_cond_timedwait(pthread_cond_t *restrict cond,
 
 #endif
 
+#ifdef WIN32
+static inline size_t getDiskUsage(const char *path)
+{
+    DWORD sectPerClust;
+    DWORD bytesPerSect;
+    DWORD freeClusters;
+    DWORD totalClusters;
+
+    size_t usage = 0;
+    BOOL result = GetDiskFreeSpace(path, &sectPerClust, &bytesPerSect,
+                                   &freeClusters, &totalClusters);
+    if (result)
+    {
+        uint64_t totalBytes = (uint64_t) totalClusters * sectPerClust * bytesPerSect;
+        uint64_t freeBytes = (uint64_t) freeClusters * sectPerClust * bytesPerSect;
+
+        usage = static_cast<double>(totalBytes - freeBytes) /
+                static_cast<double>(totalBytes) * 100;
+    }
+    return usage;
+}
+#else
+#include <sys/statvfs.h>
+
+static inline size_t getDiskUsage(const char *path)
+{
+    struct statvfs stat;
+    if (statvfs(path,&stat)) {
+        return 0;
+    }
+    size_t usage = static_cast<double>(stat.f_blocks - stat.f_bavail) /
+                   static_cast<double>(stat.f_blocks) * 100;
+    return usage;
+}
+#endif
+
+
 // Stolen from http://google-styleguide.googlecode.com/svn/trunk/cppguide.xml
 // A macro to disallow the copy constructor and operator= functions
 // This should be used in the private: declarations for a class

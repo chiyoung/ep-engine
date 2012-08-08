@@ -298,7 +298,7 @@ EventuallyPersistentStore::EventuallyPersistentStore(EventuallyPersistentEngine 
     accessLog(engine.getConfiguration().getAlogPath(),
               engine.getConfiguration().getAlogBlockSize()),
     diskFlushAll(false),
-    tctx(stats, t, mutationLog),
+    tctx(stats, t, mutationLog, engine.getConfiguration().getDbname()),
     bgFetchDelay(0)
 {
     getLogger()->log(EXTENSION_LOG_INFO, NULL,
@@ -2563,6 +2563,7 @@ void TransactionContext::commit() {
         static_cast<double>(trans_time) / static_cast<double>(numUncommittedItems) : 0;
     stats.commit_time.set(commit_time);
     stats.cumulativeCommitTime.incr(commit_time);
+    stats.diskUsage.set(getDiskUsage(dbPath.c_str()));
     intxn = false;
     uncommittedItems.clear();
     numUncommittedItems = 0;

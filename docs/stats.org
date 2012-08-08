@@ -151,7 +151,7 @@ For introductory information on stats within membase, start with the
 | ep_bg_max_load                 | The longest load time (µs)                 |
 | ep_bg_load_avg                 | The average time (µs) for an item to be    |
 |                                | loaded from the persistence layer          |
-| ep_num_non_resident            | The number of non-resident items           |                                 |
+| ep_num_non_resident            | The number of non-resident items           |
 | ep_store_max_concurrency       | Maximum allowed concurrency at the storage |
 |                                | layer.                                     |
 | ep_store_max_readers           | Maximum number of concurrent read-only.    |
@@ -165,11 +165,12 @@ For introductory information on stats within membase, start with the
 |                                | loaded from the persistence layer          |
 | ep_latency_get_cmd             | The total elapse time for get command      |
 | ep_latency_arith_cmd           | The total eplase time for arith command    |
-
+|                                |                                            |
 | ep_inconsistent_slave_chk      | Flag indicating if we allow a "downstream" |
 |                                | master to receive checkpoint messages      |
 | ep_mlog_compactor_runs         | Number of times mutation log compactor is  |
 |                                | executed.                                  |
+| ep_disk_usage                  | Current disk usage %                       |
 
 ** vBucket total stats
 

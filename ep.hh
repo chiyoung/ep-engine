@@ -122,9 +122,10 @@ class PersistenceCallback;
 class TransactionContext {
 public:
 
-    TransactionContext(EPStats &st, KVStore *ks, MutationLog &log)
+    TransactionContext(EPStats &st, KVStore *ks, MutationLog &log,
+                       const std::string &dbpath)
         : stats(st), underlying(ks), mutationLog(log),
-          tranStartTime(0),intxn(false) {}
+          tranStartTime(0), intxn(false), dbPath(dbpath) {}
 
     /**
      * Call this whenever entering a transaction.
@@ -181,6 +182,7 @@ private:
     bool intxn;
     std::list<queued_item> uncommittedItems;
     std::list<PersistenceCallback*> transactionCallbacks;
+    std::string dbPath;
 };
 
 /**

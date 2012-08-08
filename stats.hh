@@ -78,6 +78,8 @@ public:
     Atomic<size_t> flusherCommits;
     // # of completed flushes since engine starts up
     Atomic<size_t> numCompletedFlush;
+    // Current disk usage %
+    Atomic<size_t> diskUsage;
     //! Total time spent flushing.
     Atomic<size_t> cumulativeFlushTime;
     //! Total time spent committing.
